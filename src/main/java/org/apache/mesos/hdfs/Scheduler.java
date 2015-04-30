@@ -153,12 +153,22 @@ public class Scheduler implements org.apache.mesos.Scheduler, Runnable {
                 liveState.getFirstNameNodeTaskId(),
                 liveState.getFirstNameNodeSlaveId(),
                 HDFSConstants.NAME_NODE_BOOTSTRAP_MESSAGE);
+            for (HashMap.Entry<String, String> pair : persistentState.getNameNodes().entrySet()) {
+              if (pair.getValue() != liveState.getFirstNameNodeTaskId().getValue()) {
+                persistentState.setActiveNameNode(pair.getValue());
+              }
+            }
           } else if (!liveState.isNameNode2Initialized()) {
             dnsResolver.sendMessageAfterNNResolvable(
                 driver,
                 liveState.getSecondNameNodeTaskId(),
                 liveState.getSecondNameNodeSlaveId(),
                 HDFSConstants.NAME_NODE_BOOTSTRAP_MESSAGE);
+            for (HashMap.Entry<String, String> pair : persistentState.getNameNodes().entrySet()) {
+              if (pair.getValue() != liveState.getSecondNameNodeTaskId().getValue()) {
+                persistentState.setActiveNameNode(pair.getValue());
+              }
+            }
           } else {
             correctCurrentPhase();
           }
@@ -236,6 +246,7 @@ public class Scheduler implements org.apache.mesos.Scheduler, Runnable {
         .setFailoverTimeout(conf.getFailoverTimeout())
         .setUser(conf.getHdfsUser())
         .setRole(conf.getHdfsRole())
+        .setWebuiUrl(conf.getFrameworkHostAddress() + ":" + conf.getConfigServerPort())
         .setCheckpoint(true);
 
     try {

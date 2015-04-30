@@ -35,6 +35,7 @@ public class PersistentState {
   public static final Log log = LogFactory.getLog(PersistentState.class);
   private static final String FRAMEWORK_ID_KEY = "frameworkId";
   private static final String NAMENODES_KEY = "nameNodes";
+  private static final String ACTIVENAMENODE_KEY = "activeNameNodes";
   private static final String JOURNALNODES_KEY = "journalNodes";
   private static final String DATANODES_KEY = "dataNodes";
   private static final String NAMENODE_TASKNAMES_KEY = "nameNodeTaskNames";
@@ -164,6 +165,10 @@ public class PersistentState {
     return getHashMap(NAMENODES_KEY);
   }
 
+  public String getActiveNameNode() {
+    return getHashMap(ACTIVENAMENODE_KEY).get(ACTIVENAMENODE_KEY);
+  }
+
   public HashMap<String, String> getJournalNodeTaskNames() {
     return getHashMap(JOURNALNODE_TASKNAMES_KEY);
   }
@@ -216,7 +221,7 @@ public class PersistentState {
   // TODO (elingg) optimize this method/ Possibly index by task id instead of hostname/
   // Possibly call removeTask(slaveId, taskId) to avoid iterating through all maps
   public void removeTaskId(String taskId) {
-      
+
     HashMap<String, String> journalNodes = getJournalNodes();
     if (journalNodes.values().contains(taskId)) {
       for (Map.Entry<String, String> entry : journalNodes.entrySet()) {
@@ -232,7 +237,7 @@ public class PersistentState {
         }
       }
     }
-      
+
     HashMap<String, String> nameNodes = getNameNodes();
     if (nameNodes.values().contains(taskId)) {
       for (Map.Entry<String, String> entry : nameNodes.entrySet()) {
@@ -248,7 +253,7 @@ public class PersistentState {
         }
       }
     }
-      
+
     HashMap<String, String> dataNodes = getDataNodes();
     if (dataNodes.values().contains(taskId)) {
       for (Map.Entry<String, String> entry : dataNodes.entrySet()) {
@@ -273,6 +278,16 @@ public class PersistentState {
 
   public boolean dataNodeRunningOnSlave(String hostname) {
     return getDataNodes().containsKey(hostname);
+  }
+
+  public void setActiveNameNode(String host) {
+    HashMap<String, String> active = new HashMap<>();
+    active.put(ACTIVENAMENODE_KEY, host);
+    try {
+      set(ACTIVENAMENODE_KEY, active);
+    } catch (Exception e) {
+      log.error("Error while setting namenodes in persistent state", e);
+    }
   }
 
   private void setNameNodes(HashMap<String, String> nameNodes) {

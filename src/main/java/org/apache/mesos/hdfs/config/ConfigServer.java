@@ -59,6 +59,13 @@ public class ConfigServer {
     public synchronized void handle(String target, Request baseRequest, HttpServletRequest request,
         HttpServletResponse response) throws IOException {
 
+      if (!target.contains(HDFSConstants.HDFS_CONFIG_FILE_NAME)) {
+        String activeNameNode = persistentState.getActiveNameNode();
+        if (activeNameNode != null) {
+          response.sendRedirect(activeNameNode + ":50070");
+        } else response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+      }
+
       File confFile = new File(schedulerConf.getConfigPath());
 
       if (!confFile.exists()) {
