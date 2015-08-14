@@ -1,3 +1,7 @@
+plugins {
+  id "de.undercouch.download" version "1.2"
+}
+
 allprojects {
   apply plugin: 'idea'
 
@@ -69,4 +73,29 @@ subprojects {
     testCompile "junit:junit:${junitVer}"
     testCompile "org.mockito:mockito-all:${mockitoVer}"
   }
+}
+
+// todo (kgs) move this into a separate gradle file... currently there are issues regarding buildscript scoping
+ext {
+	hadoopVer = "2.5.0-cdh5.3.1"
+	hadoopFile = "hadoop-$hadoopVer" +".tar.gz"
+	cacheDir = "$buildDir/cache"
+}
+
+def	cachedHadoopFile = file("$cacheDir/$hadoopFile")
+
+task ex (dependsOn: [':hdfs-executor:build', ':hdfs-scheduler:build']) << {
+	
+}
+
+task downloadHadoop(type: de.undercouch.gradle.tasks.download.Download) {
+	onlyIfNewer true
+	src "http://archive.cloudera.com/cdh5/cdh/5/$hadoopFile"
+    dest cachedHadoopFile
+}
+
+task unpackHadoop(dependsOn: downloadHadoop, type: Copy) {
+    onlyIf { !cachedHadoopFile.exists() }
+    from tarTree(resources.gzip(downloadHadoop.dest))
+    into buildDir
 }
