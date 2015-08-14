@@ -76,13 +76,23 @@ subprojects {
 }
 
 // todo (kgs) move this into a separate gradle file... currently there are issues regarding buildscript scoping
+// below this section is for packaging
 ext {
+	cacheDir = "$buildDir/cache"
+	distFile = "hdfs-mesos-$version"
+	executorFile = "hdfs-mesos-executor-$version"
+	
+	// hadoop packaging
 	hadoopVer = "2.5.0-cdh5.3.1"
 	hadoopFile = "hadoop-$hadoopVer" +".tar.gz"
-	cacheDir = "$buildDir/cache"
+	
+	// impala packaging
+	impalaVer = "cdh5.3.1-release"
+	impalaFile = impalaVer + ".zip"
 }
 
 def	cachedHadoopFile = file("$cacheDir/$hadoopFile")
+def	cachedNativeFile = file("$cacheDir/$impalaFile")
 
 task ex (dependsOn: [':hdfs-executor:build', ':hdfs-scheduler:build']) << {
 	
@@ -95,7 +105,24 @@ task downloadHadoop(type: de.undercouch.gradle.tasks.download.Download) {
 }
 
 task unpackHadoop(dependsOn: downloadHadoop, type: Copy) {
-    onlyIf { !cachedHadoopFile.exists() }
+    onlyIf { !file("$cacheDir/hadoop-$hadoopVer").exists() }
     from tarTree(resources.gzip(downloadHadoop.dest))
-    into buildDir
+    into cacheDir
+}
+
+task downloadNativeLibs(type: de.undercouch.gradle.tasks.download.Download) {
+	onlyIfNewer true
+	onlyIf { !cachedNativeFile.exists() }
+	src "https://github.com/cloudera/Impala/archive/$impalaFile"
+    dest cachedNativeFile
+}
+
+task unpackNativeLibs(dependsOn: downloadNativeLibs, type: Copy) {
+   onlyIf { !file("$cacheDir/Impala-$impalaVer").exists() }	
+   from zipTree(downloadNativeLibs.dest)
+   into cacheDir
+}
+
+task clearCache << {
+	delete cacheDir
 }
