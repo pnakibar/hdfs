@@ -4,43 +4,45 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.mesos.Protos.CommandInfo;
 import org.apache.mesos.Protos.Environment;
-import org.apache.mesos.Protos.ExecutorID;
 import org.apache.mesos.Protos.ExecutorInfo;
 import org.apache.mesos.Protos.Offer;
-import org.apache.mesos.Protos.OfferID;
 import org.apache.mesos.Protos.Resource;
-import org.apache.mesos.Protos.TaskID;
 import org.apache.mesos.Protos.TaskInfo;
 import org.apache.mesos.SchedulerDriver;
+import org.apache.mesos.collections.MapUtil;
+import org.apache.mesos.collections.StartsWithPredicate;
 import org.apache.mesos.hdfs.config.HdfsFrameworkConfig;
 import org.apache.mesos.hdfs.config.NodeConfig;
-import org.apache.mesos.hdfs.state.IPersistentStateStore;
-import org.apache.mesos.hdfs.state.LiveState;
+import org.apache.mesos.hdfs.state.HdfsState;
 import org.apache.mesos.hdfs.util.HDFSConstants;
+import org.apache.mesos.protobuf.CommandInfoBuilder;
+import org.apache.mesos.protobuf.EnvironmentBuilder;
+import org.apache.mesos.protobuf.ExecutorInfoBuilder;
+import org.apache.mesos.protobuf.ResourceBuilder;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 
 /**
  * HdfsNode base class.
  */
 public abstract class HdfsNode implements IOfferEvaluator, ILauncher {
   private final Log log = LogFactory.getLog(HdfsNode.class);
-  private final LiveState liveState;
-  private final ResourceFactory resourceFactory;
+  private final ResourceBuilder resourceBuilder;
 
   protected final HdfsFrameworkConfig config;
-  protected final IPersistentStateStore persistenceStore;
+  protected final HdfsState state;
   protected final String name;
 
-  public HdfsNode(LiveState liveState, IPersistentStateStore persistentStore, HdfsFrameworkConfig config, String name) {
-    this.liveState = liveState;
-    this.persistenceStore = persistentStore;
+  public HdfsNode(HdfsState state, HdfsFrameworkConfig config, String name) {
+    this.state = state;
     this.config = config;
     this.name = name;
-    this.resourceFactory = new ResourceFactory(config.getHdfsRole());
+    this.resourceBuilder = new ResourceBuilder(config.getHdfsRole());
   }
 
   public String getName() {
@@ -51,30 +53,15 @@ public abstract class HdfsNode implements IOfferEvaluator, ILauncher {
 
   protected abstract List<String> getTaskTypes();
 
-  private void launch(SchedulerDriver driver, Offer offer) {
+  public void launch(SchedulerDriver driver, Offer offer)
+    throws ClassNotFoundException, IOException, InterruptedException, ExecutionException {
     List<Task> tasks = createTasks(offer);
     List<TaskInfo> taskInfos = getTaskInfos(tasks);
 
+    // The recording of Tasks is what can potentially throw the exceptions noted above.  This is good news
+    // because we are guaranteed that we do not actually launch Tasks unless we have recorded them.
     recordTasks(tasks);
     driver.launchTasks(Arrays.asList(offer.getId()), taskInfos);
-  }
-
-  public boolean tryLaunch(SchedulerDriver driver, Offer offer) {
-    String nodeName = getName();
-    OfferID offerId = offer.getId();
-
-    log.info(String.format("Node: %s, evaluating offer: %s", nodeName, offerId));
-    boolean acceptOffer = evaluate(offer);
-
-    if (acceptOffer) {
-      log.info(String.format("Node: %s, accepting offer: %s", nodeName, offerId));
-      launch(driver, offer);
-    } else {
-      log.info(String.format("Node: %s, declining offer: %s", nodeName, offerId));
-      driver.declineOffer(offerId);
-    }
-
-    return acceptOffer;
   }
 
   private List<TaskInfo> getTaskInfos(List<Task> tasks) {
@@ -87,16 +74,14 @@ public abstract class HdfsNode implements IOfferEvaluator, ILauncher {
     return taskInfos;
   }
 
-  private void recordTasks(List<Task> tasks) {
+  private void recordTasks(List<Task> tasks)
+    throws ClassNotFoundException, IOException, InterruptedException, ExecutionException {
     for (Task task : tasks) {
-      TaskID taskId = task.getId();
-      liveState.addStagingTask(taskId);
-      persistenceStore.addHdfsNode(taskId, task.getHostname(), task.getType(), task.getName());
+      state.recordTask(task);
     }
   }
 
-  private ExecutorInfo createExecutor(String taskIdName, String nodeName, String executorName) {
-    int confServerPort = config.getConfigServerPort();
+  private ExecutorInfo createExecutor(String taskIdName, String nodeName, String nnNum, String executorName) {
 
     String cmd = "export JAVA_HOME=$MESOS_DIRECTORY/" + config.getJreVersion()
       + " && env ; cd hdfs-mesos-* && "
@@ -106,50 +91,68 @@ public abstract class HdfsNode implements IOfferEvaluator, ILauncher {
       + "$EXECUTOR_OPTS "
       + "-cp lib/*.jar org.apache.mesos.hdfs.executor." + executorName;
 
-    return ExecutorInfo
-      .newBuilder()
+    return ExecutorInfoBuilder.createExecutorInfoBuilder()
       .setName(nodeName + " executor")
-      .setExecutorId(ExecutorID.newBuilder().setValue("executor." + taskIdName).build())
+      .setExecutorId(ExecutorInfoBuilder.createExecutorId("executor." + taskIdName))
       .addAllResources(getExecutorResources())
-      .setCommand(
-        CommandInfo
-          .newBuilder()
-          .addAllUris(
-            Arrays.asList(
-              CommandInfo.URI
-                .newBuilder()
-                .setValue(
-                  String.format("http://%s:%d/%s", config.getFrameworkHostAddress(),
-                    confServerPort,
-                    HDFSConstants.HDFS_BINARY_FILE_NAME))
-                .build(),
-              CommandInfo.URI
-                .newBuilder()
-                .setValue(
-                  String.format("http://%s:%d/%s", config.getFrameworkHostAddress(),
-                    confServerPort,
-                    HDFSConstants.HDFS_CONFIG_FILE_NAME))
-                .build(),
-              CommandInfo.URI
-                .newBuilder()
-                .setValue(config.getJreUrl())
-                .build()))
-          .setEnvironment(Environment.newBuilder()
-            .addAllVariables(getExecutorEnvironment())).setValue(cmd).build())
+      .setCommand(CommandInfoBuilder.createCmdInfo(cmd, getCmdUriList(nnNum), getExecutorEnvironment()))
       .build();
   }
 
-  private List<Environment.Variable> getExecutorEnvironment() {
+  private List<CommandInfo.URI> getCmdUriList(String nnNum) {
+    int confServerPort = config.getConfigServerPort();
+
+    String url = String.format("http://%s:%d/%s", config.getFrameworkHostAddress(),
+      confServerPort, HDFSConstants.HDFS_CONFIG_FILE_NAME);
+    if (nnNum != null) {
+      url += "?" + HDFSConstants.NAMENODE_NUM_PARAM + "=" + nnNum;
+    }
+
     return Arrays.asList(
-      createEnvironment("LD_LIBRARY_PATH", config.getLdLibraryPath()),
-      createEnvironment("EXECUTOR_OPTS", "-Xmx" + config.getExecutorHeap() + "m -Xms" +
-        config.getExecutorHeap() + "m"));
+      CommandInfoBuilder.createCmdInfoUri(String.format("http://%s:%d/%s", config.getFrameworkHostAddress(),
+        confServerPort,
+        HDFSConstants.HDFS_BINARY_FILE_NAME)),
+      CommandInfoBuilder.createCmdInfoUri(url),
+      CommandInfoBuilder.createCmdInfoUri(config.getJreUrl()));
   }
 
-  private Environment.Variable createEnvironment(String key, String value) {
-    return Environment.Variable.newBuilder()
-      .setName(key)
-      .setValue(value).build();
+  protected List<Environment.Variable> getExecutorEnvironment() {
+    List<Environment.Variable> env = EnvironmentBuilder.
+      createEnvironment(MapUtil.propertyMapFilter(System.getProperties(),
+        new StartsWithPredicate(HDFSConstants.PROPERTY_VAR_PREFIX)));
+    env.add(EnvironmentBuilder.createEnvironment("LD_LIBRARY_PATH", config.getLdLibraryPath()));
+    env.add(EnvironmentBuilder.createEnvironment("EXECUTOR_OPTS", "-Xmx"
+      + config.getExecutorHeap() + "m -Xms" + config.getExecutorHeap() + "m"));
+    log.info(env);
+    return env;
+  }
+
+  private List<String> getTaskNames(String taskType) {
+    List<String> names = new ArrayList<String>();
+
+    try {
+      List<Task> tasks = state.getTasks();
+      for (Task task : tasks) {
+        if (task.getType().equals(taskType)) {
+          names.add(task.getName());
+        }
+      }
+    } catch (Exception ex) {
+      log.error("Failed to retrieve task names, with exception: " + ex);
+    }
+
+    return names;
+  }
+
+  private int getTaskTargetCount(String taskType) throws SchedulerException {
+    switch (taskType) {
+      case HDFSConstants.NAME_NODE_ID:
+        return HDFSConstants.TOTAL_NAME_NODES;
+      case HDFSConstants.JOURNAL_NODE_ID:
+        return config.getJournalNodeCount();
+      default:
+        return 0;
+    }
   }
 
   private List<Resource> getTaskResources(String taskType) {
@@ -158,37 +161,28 @@ public abstract class HdfsNode implements IOfferEvaluator, ILauncher {
     double mem = nodeConfig.getMaxHeap() * config.getJvmOverhead();
 
     List<Resource> resources = new ArrayList<Resource>();
-    resources.add(resourceFactory.createCpuResource(cpu));
-    resources.add(resourceFactory.createMemResource(mem));
+    resources.add(resourceBuilder.createCpuResource(cpu));
+    resources.add(resourceBuilder.createMemResource(mem));
 
     return resources;
   }
 
-  private String getNextTaskName(String taskType) {
-    if (taskType.equals(HDFSConstants.NAME_NODE_ID)) {
-      Collection<String> nameNodeTaskNames = persistenceStore.getNameNodeTaskNames().values();
-      for (int i = 1; i <= HDFSConstants.TOTAL_NAME_NODES; i++) {
-        if (!nameNodeTaskNames.contains(HDFSConstants.NAME_NODE_ID + i)) {
-          return HDFSConstants.NAME_NODE_ID + i;
-        }
-      }
 
-      String errorStr = "Cluster is in inconsistent state. " +
-        "Trying to launch more namenodes, but they are all already running.";
-      log.error(errorStr);
-      throw new SchedulerException(errorStr);
+  private String getNextTaskName(String taskType) {
+    int targetCount = getTaskTargetCount(taskType);
+    for (int i = 1; i <= targetCount; i++) {
+      Collection<String> nameNodeTaskNames = getTaskNames(taskType);
+      String nextName = taskType + i;
+      if (!nameNodeTaskNames.contains(nextName)) {
+        return nextName;
+      }
     }
 
-    if (taskType.equals(HDFSConstants.JOURNAL_NODE_ID)) {
-      Collection<String> journalNodeTaskNames = persistenceStore.getJournalNodeTaskNames().values();
-      for (int i = 1; i <= config.getJournalNodeCount(); i++) {
-        if (!journalNodeTaskNames.contains(HDFSConstants.JOURNAL_NODE_ID + i)) {
-          return HDFSConstants.JOURNAL_NODE_ID + i;
-        }
-      }
-
-      String errorStr = "Cluster is in inconsistent state. " +
-        "Trying to launch more journalnodes, but they all are already running.";
+    // If we are attempting to find a name for a node type that
+    // expects more than 1 instance (e.g. namenode1, namenode2, etc.)
+    // we should not reach here.
+    if (targetCount > 0) {
+      String errorStr = "Task name requested when no more names are available for Task type: " + taskType;
       log.error(errorStr);
       throw new SchedulerException(errorStr);
     }
@@ -201,37 +195,42 @@ public abstract class HdfsNode implements IOfferEvaluator, ILauncher {
     double mem = config.getExecutorHeap() * config.getJvmOverhead();
 
     return Arrays.asList(
-      resourceFactory.createCpuResource(cpu),
-      resourceFactory.createMemResource(mem));
+      resourceBuilder.createCpuResource(cpu),
+      resourceBuilder.createMemResource(mem));
   }
 
-  protected boolean offerNotEnoughResources(Offer offer, double cpus, int mem) {
+  protected boolean enoughResources(Offer offer, double cpus, int mem) {
     for (Resource offerResource : offer.getResourcesList()) {
       if (offerResource.getName().equals("cpus") &&
         cpus + config.getExecutorCpus() > offerResource.getScalar().getValue()) {
-        return true;
+        return false;
       }
 
       if (offerResource.getName().equals("mem") &&
         (mem * config.getJvmOverhead())
           + (config.getExecutorHeap() * config.getJvmOverhead())
           > offerResource.getScalar().getValue()) {
-        return true;
+        return false;
       }
     }
 
-    return false;
+    return true;
   }
 
   private List<Task> createTasks(Offer offer) {
     String executorName = getExecutorName();
     String taskIdName = String.format("%s.%s.%d", name, executorName, System.currentTimeMillis());
-    List<Task> tasks = new ArrayList<Task>();
+    List<Task> tasks = new ArrayList<>();
+
+    String nnNum = getTaskTypes().contains(HDFSConstants.NAME_NODE_ID)
+      ? getNextTaskName(HDFSConstants.NAME_NODE_ID)
+      : null;
 
     for (String type : getTaskTypes()) {
-      List<Resource> resources = getTaskResources(type);
-      ExecutorInfo execInfo = createExecutor(taskIdName, name, executorName);
       String taskName = getNextTaskName(type);
+
+      List<Resource> resources = getTaskResources(type);
+      ExecutorInfo execInfo = createExecutor(taskIdName, name, nnNum, executorName);
 
       tasks.add(new Task(resources, execInfo, offer, taskName, type, taskIdName));
     }

@@ -1,38 +1,44 @@
 package org.apache.mesos.hdfs.scheduler;
 
-import com.google.protobuf.ByteString;
 import org.apache.mesos.Protos.ExecutorInfo;
 import org.apache.mesos.Protos.Offer;
 import org.apache.mesos.Protos.Resource;
 import org.apache.mesos.Protos.TaskID;
 import org.apache.mesos.Protos.TaskInfo;
+import org.apache.mesos.Protos.TaskStatus;
+import org.apache.mesos.protobuf.TaskInfoBuilder;
 
+import java.io.IOException;
+import java.io.ObjectStreamException;
+import java.io.Serializable;
 import java.util.List;
 
 /**
  * Task class encapsulates TaskInfo and metadata necessary for recording State when appropriate.
  */
-public class Task {
+public class Task implements Serializable {
   private TaskInfo info;
-  private String hostName;
+  private TaskStatus status;
+  private Offer offer;
   private String type;
   private String name;
 
-  public Task(List<Resource> resources, ExecutorInfo execInfo, Offer offer, String name, String type, String idName) {
-    TaskID taskId = TaskID.newBuilder()
-      .setValue(String.format("task.%s.%s", type, idName))
-      .build();
+  public Task(
+    List<Resource> resources,
+    ExecutorInfo execInfo,
+    Offer offer,
+    String name,
+    String type,
+    String idName) {
 
-    this.info = TaskInfo.newBuilder()
-      .setExecutor(execInfo)
-      .setName(name)
-      .setTaskId(taskId)
-      .setSlaveId(offer.getSlaveId())
+    this.info = new TaskInfoBuilder(String.format("task.%s.%s", type, idName), name, offer.getSlaveId().getValue())
+      .setExecutorInfo(execInfo)
       .addAllResources(resources)
-      .setData(ByteString.copyFromUtf8(String.format("bin/hdfs-mesos-%s", type)))
+      .setData(String.format("bin/hdfs-mesos-%s", type))
       .build();
 
-    this.hostName = offer.getHostname();
+    setStatus(null);
+    this.offer = offer;
     this.type = type;
     this.name = name;
   }
@@ -45,6 +51,14 @@ public class Task {
     return info;
   }
 
+  public TaskStatus getStatus() {
+    return status;
+  }
+
+  public Offer getOffer() {
+    return offer;
+  }
+
   public String getType() {
     return type;
   }
@@ -54,6 +68,25 @@ public class Task {
   }
 
   public String getHostname() {
-    return hostName;
+    return offer.getHostname();
+  }
+
+  public void setStatus(TaskStatus status) {
+    this.status = status;
+  }
+
+  private void writeObject(java.io.ObjectOutputStream out) throws IOException {
+    out.defaultWriteObject();
+  }
+
+  private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {
+    in.defaultReadObject();
+  }
+
+  private static class TaskDeserializationException extends ObjectStreamException {
+  }
+
+  private void readObjectNoData() throws ObjectStreamException {
+    throw new TaskDeserializationException();
   }
 }

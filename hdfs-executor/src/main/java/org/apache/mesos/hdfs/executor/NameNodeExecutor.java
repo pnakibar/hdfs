@@ -5,37 +5,56 @@ import com.google.inject.Inject;
 import com.google.inject.Injector;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.curator.RetryPolicy;
+import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.framework.recipes.locks.InterProcessMutex;
+import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.mesos.ExecutorDriver;
 import org.apache.mesos.MesosExecutorDriver;
 import org.apache.mesos.Protos.Status;
 import org.apache.mesos.Protos.TaskID;
 import org.apache.mesos.Protos.TaskInfo;
-import org.apache.mesos.Protos.TaskState;
 import org.apache.mesos.Protos.TaskStatus;
+import org.apache.mesos.file.FileUtils;
 import org.apache.mesos.hdfs.config.HdfsFrameworkConfig;
-import org.apache.mesos.hdfs.file.FileUtils;
 import org.apache.mesos.hdfs.util.HDFSConstants;
+import org.apache.mesos.hdfs.util.TaskStatusFactory;
+import org.apache.mesos.process.FailureUtils;
 
 import java.io.File;
+import java.io.IOException;
+import java.net.InetAddress;
 import java.nio.charset.Charset;
+import java.util.concurrent.TimeUnit;
 
 /**
- * The executor for the Primary Name Node Machine.
+ * The Executor for NameNodes.
  */
 public class NameNodeExecutor extends AbstractNodeExecutor {
   private final Log log = LogFactory.getLog(NameNodeExecutor.class);
+  private final CuratorFramework curatorClient;
 
   private Task nameNodeTask;
-  // TODO (elingg) better handling in livestate and persistent state of zkfc task. Right now they are
-  // chained.
   private Task zkfcNodeTask;
 
   /**
    * The constructor for the primary name node which saves the configuration.
    */
   @Inject
-  NameNodeExecutor(HdfsFrameworkConfig hdfsFrameworkConfig) {
-    super(hdfsFrameworkConfig);
+  NameNodeExecutor(HdfsFrameworkConfig config) {
+    super(config);
+    curatorClient = createCuratorClient();
+  }
+
+  private CuratorFramework createCuratorClient() {
+    String hosts = config.getHaZookeeperQuorum();
+    RetryPolicy retryPolicy =
+      new ExponentialBackoffRetry(HDFSConstants.POLL_DELAY_MS, HDFSConstants.CURATOR_MAX_RETRIES);
+
+    CuratorFramework client = CuratorFrameworkFactory.newClient(hosts, retryPolicy);
+    client.start();
+    return client;
   }
 
   /**
@@ -46,41 +65,230 @@ public class NameNodeExecutor extends AbstractNodeExecutor {
     final NameNodeExecutor executor = injector.getInstance(NameNodeExecutor.class);
     MesosExecutorDriver driver = new MesosExecutorDriver(executor);
     Runtime.getRuntime().addShutdownHook(new Thread(new TaskShutdownHook(executor, driver)));
-    System.exit(driver.run() == Status.DRIVER_STOPPED ? 0 : 1);
+    FailureUtils.exit("mesos driver exited", driver.run() == Status.DRIVER_STOPPED ? 0 : 1);
   }
 
   /**
-   * Add tasks to the task list and then start the tasks in the following order.
-   * 1) Start Journal Node
-   * 2) Receive Activate Message
-   * 3) Start Name Node
-   * 4) Start ZKFC Node
+   * Launches NameNode or ZKFC Nodes on request.
    */
   @Override
   public void launchTask(final ExecutorDriver driver, final TaskInfo taskInfo) {
     executorInfo = taskInfo.getExecutor();
-    Task task = new Task(taskInfo);
-    log.info(String.format("Launching task, taskId=%s cmd='%s'", taskInfo.getTaskId().getValue(), task.getCmd()));
+
+    // NameNode Task
     if (taskInfo.getTaskId().getValue().contains(HDFSConstants.NAME_NODE_TASKID)) {
-      nameNodeTask = task;
-      driver.sendStatusUpdate(TaskStatus.newBuilder()
-        .setTaskId(nameNodeTask.getTaskInfo().getTaskId())
-        .setState(TaskState.TASK_RUNNING)
-        .build());
+      launchNameNodeTask(driver, taskInfo);
+
       TimedHealthCheck healthCheckNN = new TimedHealthCheck(driver, nameNodeTask);
       healthCheckTimer.scheduleAtFixedRate(healthCheckNN,
-        hdfsFrameworkConfig.getHealthCheckWaitingPeriod(),
-        hdfsFrameworkConfig.getHealthCheckFrequency());
-    } else if (taskInfo.getTaskId().getValue().contains(HDFSConstants.ZKFC_NODE_ID)) {
-      zkfcNodeTask = task;
-      driver.sendStatusUpdate(TaskStatus.newBuilder()
-        .setTaskId(zkfcNodeTask.getTaskInfo().getTaskId())
-        .setState(TaskState.TASK_RUNNING)
-        .build());
+        config.getHealthCheckWaitingPeriod(),
+        config.getHealthCheckFrequency());
+      return;
+    }
+
+    // ZKFC Task
+    if (taskInfo.getTaskId().getValue().contains(HDFSConstants.ZKFC_NODE_ID)) {
+      launchZKFCTask(driver, taskInfo);
+
       TimedHealthCheck healthCheckZN = new TimedHealthCheck(driver, zkfcNodeTask);
       healthCheckTimer.scheduleAtFixedRate(healthCheckZN,
-        hdfsFrameworkConfig.getHealthCheckWaitingPeriod(),
-        hdfsFrameworkConfig.getHealthCheckFrequency());
+        config.getHealthCheckWaitingPeriod(),
+        config.getHealthCheckFrequency());
+      return;
+    }
+
+    log.error("Unrecognized Task type attempting to launch: " + taskInfo);
+  }
+
+  private void launchNameNodeTask(final ExecutorDriver driver, final TaskInfo taskInfo) {
+    Task task = new Task(taskInfo);
+    log.info("Launching NameNode Task: " + task);
+    nameNodeTask = task;
+
+    // The actual starting of a NameNode requires that its DNS address be resolvable 
+    // before it starts.  However, Mesos-DNS won't assign an address until the task is
+    // listed as RUNNING.  So we start the Thread which is going to wait for the DNS
+    // address.  We then "lie" to Mesos below telling it that the Task is RUNNING so we
+    // can get a DNS address.
+    Runnable r = new Runnable() {
+      public void run() {
+        try {
+          initNameNode(driver, nameNodeTask.getTaskInfo().getName() + "." + config.getFrameworkName()
+            + "." + config.getMesosDnsDomain());
+        } catch (Exception ex) {
+          log.error("Failed to launch " + nameNodeTask.getTaskInfo().getName(), ex);
+          // Failure to start a NameNode on a NameNodeExecutor is catastrophic.
+          FailureUtils.exit("Failed to launch Namenode", HDFSConstants.NAMENODE_EXIT_CODE);
+        }
+      }
+    };
+
+    new Thread(r).start();
+
+    // Lie to Mesos.  Tell it the NameNode Task is running, but we track it's actual
+    // "uninitialized" status in the labels.  The Scheduler depends on these labels
+    // for determing when it should move to the next phase of its state machine.
+    TaskStatus status = TaskStatusFactory.createNameNodeStatus(
+      nameNodeTask.getTaskInfo().getTaskId(),
+      false);
+
+    log.info("Sending status update: " + status);
+    driver.sendStatusUpdate(status);
+  }
+
+  private void launchZKFCTask(final ExecutorDriver driver, final TaskInfo taskInfo) {
+    Task task = new Task(taskInfo);
+    log.info("Launching ZKFC Task: " + task);
+    zkfcNodeTask = task;
+    initZKFCNode(driver);
+  }
+
+  private void initNameNode(ExecutorDriver driver, String dnsName) throws Exception {
+    waitDnsResolution(dnsName);
+
+    // All NameNodes are started simultaneously. Their startups are intentionally
+    // serialized through the mutex acquired above. The value stored in the Znode which
+    // is used as a mutex indicates whether or not any NameNode has ever been formatted.
+    // The first NameNode to acquire the mutex and find that no NameNode has ever been
+    // formatted, formats itself. All others bootstrap or recover from the backup if exists.
+    InterProcessMutex lock = new InterProcessMutex(curatorClient, getStatusPath());
+    if (lock.acquire(HDFSConstants.ZK_MUTEX_ACQUIRE_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+      try {
+        // In order to start a set of NameNodes, one must first be formatted.  Other
+        // NameNodes then bootstrap off that node or others which have already bootstrapped.
+        // If second NameNode is already bootstrapped and backupDir is defined, then
+        // we skip initialization, letting NameNode to recover from backupDir.
+
+        // So the logic is following:
+        // 1. format NameNode if not formatted;
+        // 2. bootstrap NameNode if formatted or no backup exists;
+        // 3. once some NameNode is bootstrapped and backup exists,
+        //    let NameNode to recover itself from a backup
+        String backupDir = config.getBackupDir();
+        String status = getNameNodeStatus();
+        log.info("Initializing NN, status=" + status + ", backupDir=" + backupDir);
+
+        if (status == null || status.isEmpty())  {
+          formatNameNode(driver);
+          setNameNodeStatus(HDFSConstants.NN_STATUS_FORMATTED_VAL);
+        } else if (status.equals(HDFSConstants.NN_STATUS_FORMATTED_VAL) || backupDir == null) {
+          bootstrapNameNode(driver);
+          setNameNodeStatus(HDFSConstants.NN_STATUS_BOOTSTRAPPED_VAL);
+        } else {
+          // bootstrapped && backupDir != null
+          // just start NameNode and let it recover from a backup dir
+          startNameNode(driver, null);
+        }
+      } finally {
+        lock.release();
+      }
+    } else {
+      throw new Exception("Failed to initialize NameNode status.");
+    }
+  }
+
+  private void initZKFCNode(ExecutorDriver driver) {
+    if (!processRunning(zkfcNodeTask)) {
+      startProcess(driver, zkfcNodeTask);
+    }
+
+    TaskStatus status = TaskStatusFactory.createRunningStatus(zkfcNodeTask.getTaskInfo().getTaskId());
+    driver.sendStatusUpdate(status);
+  }
+
+  private String getNameNodeStatus() throws Exception {
+    byte[] data = curatorClient.getData().forPath(getStatusPath());
+    return data != null ? new String(data, "UTF-8") : null;
+  }
+
+  private void setNameNodeStatus(String status) throws Exception {
+    curatorClient.setData().forPath(getStatusPath(), status.getBytes(Charset.forName("UTF-8")));
+  }
+
+  private void formatNameNode(ExecutorDriver driver) {
+    startNameNode(driver, HDFSConstants.NAME_NODE_INIT_MESSAGE);
+  }
+
+  private void bootstrapNameNode(ExecutorDriver driver) {
+    startNameNode(driver, HDFSConstants.NAME_NODE_BOOTSTRAP_MESSAGE);
+  }
+
+  private void startNameNode(ExecutorDriver driver, String startType) {
+    log.info("Starting NN, startType=" + startType);
+    initDir();
+
+    if (startType != null) {
+      runNameNodeCommand(driver, startType);
+    }
+
+    if (!processRunning(nameNodeTask)) {
+      startProcess(driver, nameNodeTask);
+    }
+
+    TaskStatus status = TaskStatusFactory.createNameNodeStatus(
+      nameNodeTask.getTaskInfo().getTaskId(),
+      true);
+
+    log.info("Sending status update: " + status);
+    driver.sendStatusUpdate(status);
+  }
+
+  private void runNameNodeCommand(ExecutorDriver driver, String cmd) {
+    runCommand(driver, nameNodeTask, "bin/hdfs-mesos-namenode " + cmd);
+  }
+
+  private boolean waitDnsResolution(String dnsName) {
+    while (!dnsResolves(dnsName)) {
+      log.info("Waiting for DNS resolution: " + dnsName);
+      try {
+        Thread.sleep(HDFSConstants.POLL_DELAY_MS);
+      } catch (InterruptedException ex) {
+        log.warn("DNS sleep interrupted.");
+      }
+    }
+
+    log.info("DNS resolved: " + dnsName);
+    return true;
+  }
+
+  private boolean dnsResolves(String dnsName) {
+    // Short circuit since Mesos handles this otherwise
+    if (!config.usingMesosDns()) {
+      return true;
+    }
+
+    log.info("Resolving DNS for " + dnsName);
+    try {
+      InetAddress.getByName(dnsName);
+      log.info("Successfully found " + dnsName);
+      return true;
+    } catch (SecurityException | IOException e) {
+      log.warn("Couldn't resolve dnsName " + dnsName);
+      return false;
+    }
+  }
+
+  private String getStatusPath() {
+    return "/hdfs-mesos/" + config.getFrameworkName() + "/name_node_status";
+  }
+
+  private void initDir() {
+    File nameDir = new File(config.getDataDir() + "/name");
+    FileUtils.deleteDirectory(nameDir);
+    if (!nameDir.mkdirs()) {
+      final String errorMsg = "unable to make directory: " + nameDir;
+      log.error(errorMsg);
+      throw new ExecutorException(errorMsg);
+    }
+
+    File backupDir = config.getBackupDir() != null
+        ? new File(config.getBackupDir() + "/" + nameNodeTask.getTaskInfo().getName())
+        : null;
+
+    if (backupDir != null && !backupDir.exists() && !backupDir.mkdirs()) {
+      final String errorMsg = "unable to make directory: " + backupDir;
+      log.error(errorMsg);
+      throw new ExecutorException(errorMsg);
     }
   }
 
@@ -98,10 +306,10 @@ public class NameNodeExecutor extends AbstractNodeExecutor {
       task.getProcess().destroy();
       task.setProcess(null);
     }
-    driver.sendStatusUpdate(TaskStatus.newBuilder()
-      .setTaskId(taskId)
-      .setState(TaskState.TASK_KILLED)
-      .build());
+
+    TaskStatus status = TaskStatusFactory.createKilledStatus(taskId);
+    log.info("Sending status update: " + status);
+    driver.sendStatusUpdate(status);
   }
 
   @Override
@@ -120,32 +328,7 @@ public class NameNodeExecutor extends AbstractNodeExecutor {
   public void frameworkMessage(ExecutorDriver driver, byte[] msg) {
     super.frameworkMessage(driver, msg);
     String messageStr = new String(msg, Charset.defaultCharset());
-
     log.info(String.format("Received framework message: %s", messageStr));
-
-    File nameDir = new File(hdfsFrameworkConfig.getDataDir() + "/name");
-    if (messageStr.equals(HDFSConstants.NAME_NODE_INIT_MESSAGE)
-      || messageStr.equals(HDFSConstants.NAME_NODE_BOOTSTRAP_MESSAGE)) {
-      FileUtils.deleteDirectory(nameDir);
-      if (!nameDir.mkdirs()) {
-        final String errorMsg = "unable to make directory: " + nameDir;
-        log.error(errorMsg);
-        throw new ExecutorException(errorMsg);
-      }
-      runCommand(driver, nameNodeTask, "bin/hdfs-mesos-namenode " + messageStr);
-      // todo:  (kgs) we need to separate out the launching of these tasks
-      if (!processRunning(nameNodeTask)) {
-        startProcess(driver, nameNodeTask);
-      }
-      if (!processRunning(zkfcNodeTask)) {
-        startProcess(driver, zkfcNodeTask);
-      }
-      driver.sendStatusUpdate(TaskStatus.newBuilder()
-        .setTaskId(nameNodeTask.getTaskInfo().getTaskId())
-        .setState(TaskState.TASK_RUNNING)
-        .setMessage(messageStr)
-        .build());
-    }
   }
 
   private boolean processRunning(Task task) {

@@ -1,14 +1,16 @@
 package org.apache.mesos.hdfs.scheduler;
 
+import com.google.inject.Inject;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.mesos.hdfs.config.HdfsFrameworkConfig;
-import org.apache.mesos.hdfs.state.IPersistentStateStore;
-import org.apache.mesos.hdfs.util.HDFSConstants;
-import org.apache.mesos.Protos.TaskState;
-import org.apache.mesos.Protos.TaskStatus;
 import org.apache.mesos.Protos;
+import org.apache.mesos.Protos.TaskStatus;
 import org.apache.mesos.SchedulerDriver;
+import org.apache.mesos.hdfs.config.HdfsFrameworkConfig;
+import org.apache.mesos.hdfs.state.HdfsState;
+import org.apache.mesos.hdfs.util.HDFSConstants;
+import org.apache.mesos.hdfs.util.TaskStatusFactory;
+import org.apache.mesos.protobuf.TaskUtil;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -17,6 +19,7 @@ import java.util.List;
 import java.util.Observable;
 import java.util.Observer;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 
 /**
  * HDFS Mesos Framework Reconciler class implementation.
@@ -25,17 +28,18 @@ public class Reconciler implements Observer {
   private final Log log = LogFactory.getLog(HdfsScheduler.class);
 
   private HdfsFrameworkConfig config;
-  private IPersistentStateStore store;
+  private HdfsState state;
   private Set<String> pendingTasks;
 
-  public Reconciler(HdfsFrameworkConfig config, IPersistentStateStore pStore) {
+  @Inject
+  public Reconciler(HdfsFrameworkConfig config, HdfsState state) {
     this.config = config;
-    this.store = pStore;
+    this.state = state;
     this.pendingTasks = new HashSet<String>();
   }
 
-  public void reconcile(SchedulerDriver driver) {
-    pendingTasks = store.getAllTaskIds();
+  public void reconcile(SchedulerDriver driver) throws InterruptedException, ExecutionException {
+    pendingTasks = state.getTaskIds();
     (new ReconcileThread(this, driver)).start();
   }
 
@@ -96,7 +100,7 @@ public class Reconciler implements Observer {
     log.info("=========================================");
     log.info("pendingTasks size: " + pendingTasks.size());
     for (String t : pendingTasks) {
-        log.info(t);
+      log.info(t);
     }
     log.info("=========================================");
   }
@@ -108,17 +112,15 @@ public class Reconciler implements Observer {
 
   private void explicitlyReconcileTasks(SchedulerDriver driver) {
     log.info("Explicitly Reconciling Tasks");
-    List<TaskStatus> tasks  = new ArrayList<TaskStatus>();
+    List<TaskStatus> tasks = new ArrayList<TaskStatus>();
 
     for (String id : pendingTasks) {
       if (id == null) {
         log.warn("NULL TaskID encountered during Explicit Reconciliation.");
       } else {
-        Protos.TaskID taskId = Protos.TaskID.newBuilder().setValue(id).build();
-        TaskStatus taskStatus = TaskStatus.newBuilder()
-          .setTaskId(taskId)
-          .setState(TaskState.TASK_RUNNING).build();
+        Protos.TaskID taskId = TaskUtil.createTaskId(id);
 
+        TaskStatus taskStatus = TaskStatusFactory.createRunningStatus(taskId);
         tasks.add(taskStatus);
       }
     }
@@ -129,7 +131,7 @@ public class Reconciler implements Observer {
   private class ReconcileThread extends Thread {
     private static final int BACKOFF_MULTIPLIER = 2;
 
-    private Reconciler reconciler; 
+    private Reconciler reconciler;
     private SchedulerDriver driver;
 
     public ReconcileThread(Reconciler reconciler, SchedulerDriver driver) {

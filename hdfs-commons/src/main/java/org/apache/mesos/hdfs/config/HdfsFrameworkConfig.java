@@ -1,11 +1,13 @@
 package org.apache.mesos.hdfs.config;
 
+import com.google.common.collect.Maps;
 import com.google.inject.Singleton;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.mesos.collections.StartsWithPredicate;
 import org.apache.mesos.hdfs.util.HDFSConstants;
 
 import java.net.InetAddress;
@@ -51,8 +53,42 @@ public class HdfsFrameworkConfig {
 
   private HashMap<String, NodeConfig> nodeConfigMap = new HashMap<>();
 
+  public HdfsFrameworkConfig() {
+    // The path is configurable via the mesos.conf.path system property
+    // so it can be changed when starting up the scheduler via bash
+    Properties props = System.getProperties();
+    Path configPath = new Path(props.getProperty("mesos.conf.path", "etc/hadoop/mesos-site.xml"));
+    Configuration configuration = new Configuration();
+    configuration.addResource(configPath);
+    configuration.addResource(getSysPropertiesConfiguration());
+    configuration.addResource(getEnvConfiguration());
+    setConf(configuration);
+  }
+
   public HdfsFrameworkConfig(Configuration conf) {
     setConf(conf);
+  }
+
+  private Configuration getEnvConfiguration() {
+    Map<String, String> map = Maps.filterKeys(System.getenv(),
+      new StartsWithPredicate(HDFSConstants.PROPERTY_VAR_PREFIX));
+    return mapToConfiguration(map);
+  }
+
+  private Configuration mapToConfiguration(Map<String, String> map) {
+    Configuration cfg = new Configuration(false);
+    for (Map.Entry<String, String> entry : map.entrySet()) {
+      String cfgName = entry.getKey().toLowerCase().replace("_", ".");
+      cfg.set(cfgName, entry.getValue());
+    }
+    return cfg;
+  }
+
+  @SuppressWarnings("unchecked")
+  private Configuration getSysPropertiesConfiguration() {
+    Map<String, String> map = new HashMap(System.getProperties());
+    map = Maps.filterKeys(map, new StartsWithPredicate(HDFSConstants.PROPERTY_VAR_PREFIX));
+    return mapToConfiguration(map);
   }
 
   private void setConf(Configuration conf) {
@@ -81,16 +117,6 @@ public class HdfsFrameworkConfig {
 
   public NodeConfig getNodeConfig(String nodeType) {
     return nodeConfigMap.get(nodeType);
-  }
-
-  public HdfsFrameworkConfig() {
-    // The path is configurable via the mesos.conf.path system property
-    // so it can be changed when starting up the scheduler via bash
-    Properties props = System.getProperties();
-    Path configPath = new Path(props.getProperty("mesos.conf.path", "etc/hadoop/mesos-site.xml"));
-    Configuration configuration = new Configuration();
-    configuration.addResource(configPath);
-    setConf(configuration);
   }
 
   public String getPrincipal() {
@@ -271,7 +297,15 @@ public class HdfsFrameworkConfig {
   }
 
   public String getSecondaryDataDir() {
-    return getConf().get("mesos.hdfs.secondary.data.dir", "/var/run/hadoop-hdfs");
+    return getConf().get("mesos.hdfs.secondary.data.dir");
+  }
+
+  public String getDomainSocketDir() {
+    return getConf().get("mesos.hdfs.domain.socket.dir", "/var/run/hadoop-hdfs");
+  }
+
+  public String getBackupDir() {
+    return getConf().get("mesos.hdfs.backup.dir");
   }
 
   public String getHaZookeeperQuorum() {
@@ -347,7 +381,7 @@ public class HdfsFrameworkConfig {
   public int getHealthCheckWaitingPeriod() {
     return getConf().getInt("mesos.hdfs.healthcheck.waitingperiod.ms", DEFAULT_HEALTH_CHECK_WAITING_PERIOD_MS);
   }
-  
+
   public Map<String, String> getMesosSlaveConstraints() {
     String constraints = getConf().get("mesos.hdfs.constraints");
     Map<String, String> constraintsMap = new HashMap<String, String>();
@@ -357,8 +391,8 @@ public class HdfsFrameworkConfig {
         String[] keyValue = pair.split(":");
         if (keyValue.length > 0) {
           String key = keyValue[0];
-          String value = keyValue.length == 1 ? "" : 
-             keyValue.length == 2 ? keyValue[1] : pair.substring(pair.indexOf(":"));
+          String value = keyValue.length == 1 ? "" :
+            keyValue.length == 2 ? keyValue[1] : pair.substring(pair.indexOf(":"));
           constraintsMap.put(key, value);
         }
       }

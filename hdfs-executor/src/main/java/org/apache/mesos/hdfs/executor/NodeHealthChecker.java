@@ -1,15 +1,14 @@
 package org.apache.mesos.hdfs.executor;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.mesos.hdfs.util.HDFSConstants;
+import org.apache.mesos.stream.StreamUtil;
+
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.mesos.ExecutorDriver;
-import org.apache.mesos.hdfs.util.HDFSConstants;
 
 /**
  * The Task class for use within the executor.
@@ -21,7 +20,7 @@ public class NodeHealthChecker {
   public NodeHealthChecker() {
   }
 
-  public boolean runHealthCheckForTask(ExecutorDriver driver, Task task) {
+  public boolean runHealthCheckForTask(Task task) {
     String taskIdStr = task.getTaskInfo().getTaskId().getValue();
     int healthCheckPort = getHealthCheckPort(taskIdStr);
     boolean taskHealthy = false;
@@ -48,7 +47,7 @@ public class NodeHealthChecker {
       } catch (SecurityException | IllegalArgumentException e) {
         log.error(healthCheckErrStr, e);
       }
-      IOUtils.closeQuietly(socket);
+      StreamUtil.closeQuietly(socket);
     }
 
     return taskHealthy;

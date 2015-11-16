@@ -1,8 +1,9 @@
 plugins {
-  id 'com.github.johnrengelman.shadow' version '1.2.1'
+  id 'com.github.johnrengelman.shadow' version '1.2.2'
 }
 
 dependencies {
+  compile project(':mesos-commons')
   compile project(':hdfs-commons')
 
 }
