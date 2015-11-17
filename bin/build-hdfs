@@ -8,11 +8,11 @@ PROJ_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )"/..  && pwd )"
 BUILD_DIR=$PROJ_DIR/build
 BUILD_CACHE_DIR=$BUILD_DIR/cache
 
-HADOOP_VER=2.5.0-cdh5.3.1
+HADOOP_VER=2.6.0-cdh5.4.8
 HADOOP_DIR=hadoop-$HADOOP_VER
 HADOOP_ZIP=$HADOOP_DIR.tar.gz
 HADOOP_URL=http://archive.cloudera.com/cdh5/cdh/5/$HADOOP_ZIP
-IMPALA_VER=cdh5.3.1-release
+IMPALA_VER=cdh5.4.8-release
 IMPALA_ZIP=$IMPALA_VER.zip
 IMPALA_URL=https://github.com/cloudera/Impala/archive/$IMPALA_ZIP
 NATIVE=native
