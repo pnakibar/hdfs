@@ -9,8 +9,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.mesos.collections.StartsWithPredicate;
 import org.apache.mesos.hdfs.util.HDFSConstants;
+import org.apache.mesos.net.HostUtil;
 
-import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.Map;
@@ -329,15 +329,12 @@ public class HdfsFrameworkConfig {
   }
 
   public String getFrameworkHostAddress() {
-    String hostAddress = getConf().get("mesos.hdfs.framework.hostaddress");
-    if (hostAddress == null) {
-      try {
-        hostAddress = InetAddress.getLocalHost().getHostAddress();
-      } catch (UnknownHostException e) {
-        throw new ConfigurationException(e);
-      }
+    String configuredIP = getConf().get("mesos.hdfs.framework.hostaddress");
+    try {
+      return HostUtil.getHostIP(configuredIP);
+    } catch (UnknownHostException e) {
+      throw new ConfigurationException(e);
     }
-    return hostAddress;
   }
 
   // The port can be changed by setting the PORT0 environment variable

@@ -3,10 +3,10 @@ package org.apache.mesos.hdfs.executor;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.mesos.hdfs.util.HDFSConstants;
+import org.apache.mesos.net.HostUtil;
 import org.apache.mesos.stream.StreamUtil;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 
@@ -34,7 +34,7 @@ public class NodeHealthChecker {
         // bound to the port.
         // Also, possibly do a http check for the name node UI as an additional
         // health check.
-        String localhostAddress = InetAddress.getLocalHost().getHostAddress();
+        String localhostAddress = HostUtil.getHostIP();
         socket = new Socket();
         socket.bind(new InetSocketAddress(localhostAddress, healthCheckPort));
       } catch (IOException e) {
