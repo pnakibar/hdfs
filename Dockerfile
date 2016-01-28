@@ -16,7 +16,7 @@ WORKDIR /root/hdfs/build/hdfs-mesos-0.1.5
 EXPOSE 50070
 
 ENV frameworkName testhdfs
-ENV zookeperhost 127.0.0.1
+ENV zookeeperhost 127.0.0.1
 ENV mesoauthsuser master
 ENV mesosauthpassword 1234
 
