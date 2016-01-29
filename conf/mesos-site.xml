@@ -60,19 +60,19 @@
   <property>
     <name>mesos.hdfs.state.zk</name>
     <description>Comma-separated hostname-port pairs of zookeeper node locations for HDFS framework state information</description>
-    <value>${zookeeperhost}:2181</value>
+    <value>localhost:2181</value>
   </property>
 
   <property>
     <name>mesos.master.uri</name>
     <description>Zookeeper entry for mesos master location</description>
-    <value>zk://${zookeeperhost}:2181/mesos</value>
+    <value>zk://localhost:2181/mesos</value>
   </property>
 
   <property>
     <name>mesos.hdfs.zkfc.ha.zookeeper.quorum</name>
     <description>Comma-separated list of zookeeper hostname-port pairs for HDFS HA features</description>
-    <value>${zookeeperhost}:2181</value>
+    <value>localhost:2181</value>
   </property>
 
   <property>
@@ -107,12 +107,12 @@
   
   <property>
   <name>mesos.hdfs.principal</name>
-  <value>${mesoauthsuser}{</value>
+  <value>master{</value>
 </property>
 
 <property>
   <name>mesos.hdfs.secret</name>
-  <value>${mesosauthpassword}</value>
+  <value>1234</value>
 </property>
 
   <!-- Additional settings for fine-tuning -->
