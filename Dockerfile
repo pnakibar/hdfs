@@ -5,8 +5,9 @@ FROM mesosphere/mesos:0.23.0-1.0.ubuntu1404
 RUN apt-get update && apt-get install -y git openjdk-7-jdk unzip wget
 
 
-WORKDIR /root/
-RUN git clone https://github.com/pnakibar/hdfs.git
+
+ADD . /root/hdfs
+
 WORKDIR /root/hdfs
 
 RUN ./bin/build-hdfs
