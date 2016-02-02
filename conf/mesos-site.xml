@@ -107,7 +107,7 @@
   
   <property>
   <name>mesos.hdfs.principal</name>
-  <value>master{</value>
+  <value>master</value>
 </property>
 
 <property>
