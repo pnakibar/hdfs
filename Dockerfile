@@ -1,5 +1,5 @@
 #to run: docker run --net="host" -P IMAGE
-#yes: this needs to improvements
+#yes: this needs improvements
 FROM mesosphere/mesos:0.23.0-1.0.ubuntu1404
 
 RUN apt-get update && apt-get install -y git openjdk-7-jdk unzip wget
